@@ -1,0 +1,7 @@
+# 知识库：把 massCode 的 markdown vault 接进 DSH。
+#
+# 宿主侧只注册一个插件行；页面在客户端（lib/client.js），数据经由 /knowledge-base
+# 这条 loopback RPC 通道读写 vault，不复制、不另建索引。
+- insert:
+    - id: knowledge-base
+      name: dsh-knowledge-base
