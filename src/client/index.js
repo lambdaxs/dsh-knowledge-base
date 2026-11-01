@@ -599,7 +599,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 						value: dialogValue,
 						placeholder: '名字',
 						onChange: (event) => setDialogValue(event.target.value ?? ''),
-						onKeyDown: (event) => { if (event.key === 'Enter') submit() },
+						onKeyDown: (event) => { if (isSubmitEnter(event)) submit() },
 					}))
 				}
 			}
@@ -623,7 +623,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 								value: draft, placeholder: selected === null ? '文件夹名' : `建在「${selected}」下`,
 								onChange: (event) => setDraft(event.target.value ?? ''),
 								onKeyDown: (event) => {
-									if (event.key === 'Enter') void submitCreate()
+									if (isSubmitEnter(event)) void submitCreate()
 									if (event.key === 'Escape') setAdding(false)
 								},
 							}),
@@ -764,6 +764,13 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 		}
 
 		/** 组装「问 DSH」的首条草稿：笔记路径 + 正文 + 待补的问题。 */
+		// 输入法正在拼字时的回车是「上屏候选词」，不是提交：isComposing / keyCode 229 都放过。
+		function isSubmitEnter(event) {
+			if (event.key !== 'Enter') return false
+			const native = event.nativeEvent ?? {}
+			return !(event.isComposing || native.isComposing || event.keyCode === 229 || native.keyCode === 229)
+		}
+
 		function composePrompt(note) {
 			const head = [`# 参考文献：${note.meta.name}`, `路径：notes/${note.path}`, note.meta.isTask ? `任务状态：${note.meta.taskStatus ?? 'todo'}${note.meta.taskDue ? ` / 截止 ${note.meta.taskDue}` : ''}` : '', '', '---', '', note.body.trim()].filter((line) => line !== null).join('\n')
 			return `${head}\n\n---\n\n请基于上面这篇笔记回答：\n`
@@ -986,7 +993,43 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 
 			useEffect(() => { reload() }, [reload])
 
+			// 编辑中的最新状态：自动保存、切走前保存都从这里读，避免拿到过期的闭包值。
+			const liveRef = useRef({ detail: null, draft: '', saving: false, mounted: true })
+			liveRef.current.detail = detail
+			liveRef.current.draft = draft
+
+			// 真正落盘的那一步：手动保存、自动保存、切走前保存共用一个实现。
+			const persist = useCallback(async (options) => {
+				const live = liveRef.current
+				const current = live.detail
+				if (current === null || live.saving) return false
+				const body = live.draft
+				if (body === current.body) return false
+				live.saving = true
+				try {
+					const value = await call('note/save', { path: current.path, body, mtimeMs: current.mtimeMs })
+					// 保存期间用户可能已经切走或又敲了字：只在还是这篇、内容没变时回写。
+					if (live.detail !== null && live.detail.path === value.path) {
+						setDetail(value)
+						if (live.draft === body) setDraft(value.body)
+					}
+					if (live.mounted) {
+						setNotice(options && options.manual ? '已保存' : '已自动保存')
+						setError(null)
+					}
+					if (options && options.reloadTree) await reload()
+					return true
+				} catch (reason) {
+					if (live.mounted) setError(String(reason && reason.message ? reason.message : reason))
+					return false
+				} finally {
+					live.saving = false
+				}
+			}, [call, reload])
+
 			const openNote = useCallback(async (notePath) => {
+				// 切走之前先把手上没存的改动落盘，别让「换一篇」等于丢弃。
+				await persist()
 				setSelected(notePath)
 				setNotice(null)
 				try {
@@ -999,25 +1042,45 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 					setError(String(reason && reason.message ? reason.message : reason))
 					setDetail(null)
 				}
-			}, [call, loadAssetsFor])
+			}, [call, loadAssetsFor, persist])
+
+
+			// 返回列表：同样是「切走」，先把改动存了。
+			const closeNote = useCallback(async () => {
+				await persist()
+				setDetail(null)
+				setSelected(null)
+			}, [persist])
 
 			const save = useCallback(async () => {
 				if (detail === null) return
 				setBusy(true)
-				try {
-					const value = await call('note/save', { path: detail.path, body: draft, mtimeMs: detail.mtimeMs })
-					setDetail(value)
-					setDraft(value.body)
-					setNotice('已保存')
-					await reload()
-				} catch (reason) {
-					setError(String(reason && reason.message ? reason.message : reason))
-				} finally {
-					setBusy(false)
-				}
-			}, [call, detail, draft, reload])
+				try { await persist({ manual: true, reloadTree: true }) } finally { setBusy(false) }
+			}, [detail, persist])
 
 			const dirty = detail !== null && draft !== detail.body
+
+			// 自动保存：停手 1.2 秒就落盘。
+			useEffect(() => {
+				if (detail === null || draft === detail.body) return undefined
+				const timer = setTimeout(() => { void persist() }, 1200)
+				return () => clearTimeout(timer)
+			}, [detail, draft, persist])
+
+			// 离开知识库 / 切到后台 / 关窗口：把还没存的改动尽量落盘。
+			useEffect(() => {
+				liveRef.current.mounted = true
+				const flush = () => { void persist() }
+				const onHide = () => { if (document.visibilityState === 'hidden') flush() }
+				document.addEventListener('visibilitychange', onHide)
+				window.addEventListener('pagehide', flush)
+				return () => {
+					liveRef.current.mounted = false
+					document.removeEventListener('visibilitychange', onHide)
+					window.removeEventListener('pagehide', flush)
+					flush()
+				}
+			}, [persist])
 
 			// ⌘S / Ctrl+S 保存：焦点在编辑器里也走这一条，顺手拦掉浏览器自己的保存页面。
 			useEffect(() => {
@@ -1124,13 +1187,14 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 			useEffect(() => { void loadTrash() }, [loadTrash])
 
 			const enterTrash = useCallback(() => {
+				void persist()
 				setTrashMode(true)
 				setFolder(null)
 				setSelected(null)
 				setDetail(null)
 				setQuery('')
 				void loadTrash()
-			}, [loadTrash])
+			}, [loadTrash, persist])
 
 			const restoreTrash = useCallback(async (path) => noteOp(
 				() => call('trash/restore', { path }),
@@ -1386,7 +1450,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 					value: dialogValue,
 					placeholder: '笔记名',
 					onChange: (event) => setDialogValue(event.target.value ?? ''),
-					onKeyDown: (event) => { if (event.key === 'Enter') submit() },
+					onKeyDown: (event) => { if (isSubmitEnter(event)) submit() },
 				}))
 			}
 
@@ -1447,7 +1511,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 								value: configDraft,
 								placeholder: configInfo?.defaultVaultRoot ?? '/Users/…/markdown-vault',
 								onChange: (event) => setConfigDraft(event.target.value ?? ''),
-								onKeyDown: (event) => { if (event.key === 'Enter') applyConfig() },
+								onKeyDown: (event) => { if (isSubmitEnter(event)) applyConfig() },
 							}),
 							h('div', { className: 'kb-modal-hint' },
 								'默认：', configInfo?.defaultVaultRoot ?? '（未知）',
@@ -1502,7 +1566,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 								value: newName,
 								placeholder: folder === null ? '新笔记（根目录，回车创建）' : `新笔记（${folder}，回车创建）`,
 								onChange: (event) => setNewName(event.target.value ?? ''),
-								onKeyDown: (event) => { if (event.key === 'Enter') void create() },
+								onKeyDown: (event) => { if (isSubmitEnter(event)) void create() },
 							})),
 							h(Button, { disabled: busy || newName.trim() === '', onClick: () => void create() }, h(IconPlusOutlineRegular, { size: 14 }))),
 					error !== null ? h('div', { className: 'kb-error' }, error) : null,
@@ -1541,7 +1605,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 							: '选一篇笔记打开；任务可以直接点前面的圆圈打勾。')
 						: h(react.Fragment, null,
 							h('div', { className: 'kb-head' },
-								h('button', { className: 'kb-back', 'aria-label': '返回列表', onClick: () => { setDetail(null); setSelected(null) } }, '‹'),
+								h('button', { className: 'kb-back', 'aria-label': '返回列表', onClick: () => void closeNote() }, '‹'),
 								h('div', { className: 'kb-title', title: detail.meta.name },
 									detail.meta.name,
 									dirty ? h('span', { className: 'kb-dirty', title: '有未保存的改动' }) : null),
