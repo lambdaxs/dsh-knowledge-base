@@ -297,3 +297,34 @@ console.log('✓ 全部通过  临时 vault:', root)
   assert.ok(!state4.notes.some((n) => String(n.filePath).startsWith('.masscode/trash/')), 'state.json 里的回收站条目要清掉')
   console.log('✓ 回收站 列出 / 恢复 / 彻底删除 / 清空 通过')
 }
+
+// 名字里的 / 不能当路径用：创建/重命名都必须明确拒绝，而不是悄悄建子文件夹或吞字符。
+{
+  const r5 = await mkdtemp(join(tmpdir(), 'vault-name-'))
+  await mkdir(join(r5, 'notes', '.masscode'), { recursive: true })
+  await writeFile(join(r5, 'notes', '.masscode', 'state.json'), JSON.stringify({ version: 1, counters: { folderId: 0, noteId: 0, tagId: 0 }, folderUi: {}, notes: [], tags: [] }))
+
+  await assert.rejects(createNote(r5, { name: '产品/需求' }), /不能包含/)
+  await assert.rejects(createNote(r5, { name: '产品\\需求' }), /不能包含/)
+  await assert.rejects(createNote(r5, { name: '.隐藏的' }), /不能以 \. 开头/)
+  await assert.rejects(createNote(r5, { name: '带\u0001控制符' }), /控制字符/)
+  await assert.rejects(createNote(r5, { name: 'x'.repeat(201) }), /太长/)
+  await assert.rejects(createFolder(r5, { name: 'A/B' }), /不能包含/)
+  await assert.rejects(createFolder(r5, { name: 'A\\B' }), /不能包含/)
+
+  // 合法的照常建，扩展名照旧去掉，空名字仍有默认值
+  const okNote = await createNote(r5, { name: '正常标题.md' })
+  assert.equal(okNote.path, '正常标题.md')
+  const untitled = await createNote(r5, { name: '   ' })
+  assert.equal(untitled.path, '未命名笔记.md')
+  const okFolder = await createFolder(r5, { name: '产品输出' })
+  assert.equal(okFolder.path, '产品输出')
+
+  // 重命名也必须拒绝，不能像以前那样静默删掉斜杠
+  await assert.rejects(renameNote(r5, { path: '正常标题.md', name: '改/名' }), /不能包含/)
+  assert.equal((await readNote(r5, '正常标题.md')).meta.name, '正常标题')
+  await assert.rejects(renameFolder(r5, { path: '产品输出', name: 'B/C' }), /不能包含/)
+  const renamed = await renameNote(r5, { path: '正常标题.md', name: '改好的名字' })
+  assert.equal(renamed.path, '改好的名字.md')
+  console.log('✓ 名字里的 / 一律拒绝（创建/重命名/文件夹）通过')
+}

@@ -151,6 +151,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 [data-kb] .kb-empty { padding: 24px; color: var(--kb-ink-2); font-size: 13px; line-height: 1.6; }
 [data-kb] .kb-empty-center { margin: auto; text-align: center; max-width: 260px; }
 [data-kb] .kb-error { padding: 8px 12px; color: var(--kb-danger); font-size: 12px; }
+[data-kb] .kb-modal-error { margin-top: 8px; color: var(--kb-danger); }
 
 /* ---- 编辑器 ---- */
 [data-kb] .kb-cm { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
@@ -379,7 +380,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 					h('span', null, item.label))))
 		}
 
-		function Dialog({ open, title, hint, children, actions, onClose }) {
+		function Dialog({ open, title, hint, error, children, actions, onClose }) {
 			useEffect(() => {
 				if (!open) return undefined
 				const key = (event) => { if (event.key === 'Escape') onClose() }
@@ -391,6 +392,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 				h('div', { className: 'kb-modal-card' },
 					title === undefined ? null : h('div', { className: 'kb-modal-title' }, title),
 					hint === undefined ? null : h('div', { className: 'kb-modal-hint' }, hint),
+					error ? h('div', { className: 'kb-modal-hint kb-modal-error' }, error) : null,
 					children,
 					actions === undefined ? null : h('div', { className: 'kb-modal-actions' }, actions)))
 		}
@@ -434,6 +436,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 			const [menu, setMenu] = useState(null)
 			const [dialog, setDialog] = useState(null)
 			const [dialogValue, setDialogValue] = useState('')
+			const [dialogError, setDialogError] = useState(null)
 
 			const byParent = useMemo(() => {
 				const map = new Map()
@@ -461,11 +464,13 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 			const openDialog = (kind, folder, value = '') => {
 				setDialog({ kind, path: folder.path, name: folder.name })
 				setDialogValue(value)
+				setDialogError(null)
 				setMenu(null)
 			}
 			const closeDialog = () => {
 				setDialog(null)
 				setDialogValue('')
+				setDialogError(null)
 			}
 			const run = async (task) => {
 				if (busy) return
@@ -480,6 +485,8 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 			const submitCreate = async () => {
 				const name = draft.trim()
 				if (name === '') return
+				const problem = nameProblem(name, '文件夹', false)
+				if (problem !== '') { setError(problem); return }
 				await run(async () => {
 					const created = await onCreateFolder(name, selected ?? '')
 					setDraft('')
@@ -578,6 +585,8 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 						if (name === '') return
 						const kind = dialog.kind
 						const path = dialog.path
+						const problem = nameProblem(name, kind === 'newNote' ? '笔记' : '文件夹', kind === 'newNote')
+						if (problem !== '') { setDialogError(problem); return }
 						closeDialog()
 						void run(async () => {
 							if (kind === 'rename') await onRenameFolder(path, name)
@@ -590,7 +599,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 						})
 					}
 					dialogNode = h(Dialog, {
-						open: true, title, onClose: closeDialog,
+						open: true, title, onClose: closeDialog, error: dialogError,
 						hint: dialog.kind === 'rename' ? undefined : `位置：${dialog.path === '' ? '根目录' : dialog.path}`,
 						actions: h(react.Fragment, null,
 							h(Button, { onClick: closeDialog }, '取消'),
@@ -598,7 +607,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 					}, h(Input, {
 						value: dialogValue,
 						placeholder: '名字',
-						onChange: (event) => setDialogValue(event.target.value ?? ''),
+						onChange: (event) => { setDialogValue(event.target.value ?? ''); setDialogError(null) },
 						onKeyDown: (event) => { if (isSubmitEnter(event)) submit() },
 					}))
 				}
@@ -764,6 +773,21 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 		}
 
 		/** 组装「问 DSH」的首条草稿：笔记路径 + 正文 + 待补的问题。 */
+		// 和 lib/vault.js 的 cleanName 同一套规则：名字里不能有 /，层级用文件夹表达。
+		// 两边任一处改规则都要同步改另一处。
+		function nameProblem(input, kind, stripMd) {
+			let name = String(input ?? '').trim()
+			if (stripMd) name = name.replace(/\.md$/iu, '').trim()
+			if (name === '') return kind + '名不能为空'
+			if (name === '.' || name === '..') return kind + '名不合法'
+			if (name.startsWith('.')) return kind + '名不能以 . 开头（会被当成隐藏文件）'
+			if (/[/\\]/u.test(name)) return kind + '名里不能包含 / 或 \\，层级请用文件夹区分'
+			if (/[\u0000-\u001f\u007f]/u.test(name)) return kind + '名里不能包含控制字符'
+			if (/[. ]$/u.test(name)) return kind + '名不能以空格或 . 结尾'
+			if (new TextEncoder().encode(name).length > 200) return kind + '名太长（最多 200 字节）'
+			return ''
+		}
+
 		// 输入法正在拼字时的回车是「上屏候选词」，不是提交：isComposing / keyCode 229 都放过。
 		function isSubmitEnter(event) {
 			if (event.key !== 'Enter') return false
@@ -784,6 +808,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 			const [noteMenu, setNoteMenu] = useState(null)
 			const [noteDialog, setNoteDialog] = useState(null)
 			const [dialogValue, setDialogValue] = useState('')
+			const [dialogError, setDialogError] = useState(null)
 			const [dragNote, setDragNote] = useState(null)
 			// 回收站：独立视图（folder === null 那些逻辑不掺进来）
 			const [trashMode, setTrashMode] = useState(false)
@@ -1292,6 +1317,8 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 			const create = useCallback(async () => {
 				const name = newName.trim()
 				if (name === '') return
+				const problem = nameProblem(name, '笔记', true)
+				if (problem !== '') { setError(problem); return }
 				setBusy(true)
 				try {
 					const created = await call('note/create', { folderPath: folder ?? '', name })
@@ -1393,7 +1420,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 				const group = groupOf(note)
 				const at = group.findIndex((item) => item.path === note.path)
 				return [
-					{ key: 'rename', label: '重命名', run: () => { setNoteDialog({ kind: 'rename', path: note.path }); setDialogValue(note.name) } },
+					{ key: 'rename', label: '重命名', run: () => { setNoteDialog({ kind: 'rename', path: note.path }); setDialogValue(note.name); setDialogError(null) } },
 					{ key: 'move', label: '移动到…', run: () => setNoteDialog({ kind: 'move', path: note.path }) },
 					// 搜索结果是跨文件夹的，这时候排序没有意义，直接禁用
 					{ key: 'up', label: '上移', disabled: hits !== null || at <= 0, run: () => void nudge(note, -1) },
@@ -1405,6 +1432,7 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 			const closeNoteDialog = () => {
 				setNoteDialog(null)
 				setDialogValue('')
+				setDialogError(null)
 			}
 
 			// 笔记的三个对话框：重命名 / 移动 / 删除（删除有二次确认）
@@ -1437,19 +1465,21 @@ import * as primitives from '@deepseek-ai/dsh-client-ui-primitives'
 				const submit = () => {
 					const name = dialogValue.trim()
 					if (name === '') return
+					const problem = nameProblem(name, '笔记', true)
+					if (problem !== '') { setDialogError(problem); return }
 					const path = noteDialog.path
 					closeNoteDialog()
 					void renameNoteByPath(path, name)
 				}
 				return h(Dialog, {
-					open: true, title: '重命名笔记', onClose: closeNoteDialog,
+					open: true, title: '重命名笔记', onClose: closeNoteDialog, error: dialogError,
 					actions: h(react.Fragment, null,
 						h(Button, { onClick: closeNoteDialog }, '取消'),
 						h(Button, { disabled: dialogValue.trim() === '', onClick: submit }, '确定')),
 				}, h(Input, {
 					value: dialogValue,
 					placeholder: '笔记名',
-					onChange: (event) => setDialogValue(event.target.value ?? ''),
+					onChange: (event) => { setDialogValue(event.target.value ?? ''); setDialogError(null) },
 					onKeyDown: (event) => { if (isSubmitEnter(event)) submit() },
 				}))
 			}
